@@ -1,0 +1,1 @@
+{"name":"grim-replay-web","version":"0.1.0","private":true,"type":"module","scripts":{"dev":"vite --host 127.0.0.1","build":"vite build","preview":"vite preview --host 127.0.0.1","test":"node --test test/*.test.js"},"dependencies":{"@fontsource/chivo":"^5.2.8","@fontsource/chivo-mono":"^5.2.8","three":"^0.180.0"},"devDependencies":{"vite":"^6.4.1"}}

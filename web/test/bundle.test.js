@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {gzipSync} from 'node:zlib';
+import {validateBundle,decodeBundle} from '../src/bundle.js';
+import {WorldTimeline,boxesFor,frameAt} from '../src/world.js';
+function bundle(){return{schemaVersion:1,id:'test',serverId:'test',createdAt:'2026-11-13T00:00:00Z',player:{uuid:'uuid',name:'Test'},dimension:'minecraft:overworld',startTick:0,endTick:20,tickRate:20,snapshots:[{tick:0,chunks:[{x:-1,z:0,sections:[{y:4,palette:['minecraft:air','minecraft:stone'],indices:Array.from({length:4096},(_,i)=>i===0?1:0)}]}]}],blockChanges:[{tick:5,x:-16,y:64,z:0,state:'minecraft:air'},{tick:10,x:0,y:64,z:0,state:'minecraft:oak_slab[type=top]'}],frames:[{tick:0,x:0,y:65,z:0,yaw:0,pitch:0},{tick:20,x:1,y:65,z:1,yaw:90,pitch:0}],flags:[],warnings:[],entities:[]};}
+test('gzip bundle roundtrip and schema validation',async()=>{const b=bundle();assert.deepEqual(await decodeBundle(gzipSync(JSON.stringify(b))),b);});
+test('reject missing palette index and unbounded frame input',()=>{const b=bundle();b.snapshots[0].chunks[0].sections[0].indices[2]=5;assert.throws(()=>validateBundle(b),/palette index/);const c=bundle();c.frames[0].x=Infinity;assert.throws(()=>validateBundle(c),/x/);});
+test('negative chunks, deltas and rewind preserve terrain',()=>{const w=new WorldTimeline(bundle());w.seek(0);assert.equal(w.blocks.get('-16,64,0').state,'minecraft:stone');w.seek(5);assert.equal(w.blocks.size,0);w.seek(10);assert.equal(w.blocks.get('0,64,0').state,'minecraft:oak_slab[type=top]');w.seek(0);assert.equal(w.blocks.size,1);assert.ok(w.blocks.has('-16,64,0'));});
+test('later snapshots precede same-tick changes',()=>{const b=bundle();b.snapshots.push({...structuredClone(b.snapshots[0]),tick:5});const w=new WorldTimeline(b);w.seek(5);assert.equal(w.blocks.size,0);});
+test('slabs, stairs and doors preserve principal state',()=>{assert.deepEqual(boxesFor('minecraft:oak_slab[type=top]'),[[0,.5,0,1,.5,1]]);assert.deepEqual(boxesFor('minecraft:oak_stairs[facing=east,half=bottom]')[1],[.5,.5,0,.5,.5,1]);assert.notDeepEqual(boxesFor('minecraft:oak_door[facing=north,open=false]'),boxesFor('minecraft:oak_door[facing=north,open=true]'));});
+test('seek selects the last observed frame without inventing movement',()=>{assert.equal(frameAt(bundle().frames,10).tick,0);assert.equal(frameAt(bundle().frames,20).tick,20);});
+test('reject unsorted movement and unsupported schema',()=>{const b=bundle();b.frames.reverse();assert.throws(()=>validateBundle(b),/strictly ordered/);b.schemaVersion=2;assert.throws(()=>validateBundle(b),/unsupported/);});
+test('live terrain occupancy is bounded before allocating more blocks',()=>{const b=bundle();b.blockChanges=[{tick:5,x:1,y:64,z:0,state:'minecraft:stone'}];const w=new WorldTimeline(b,1);assert.throws(()=>w.seek(5),/browser limit/);assert.equal(w.blocks.size,1);});

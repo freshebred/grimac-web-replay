@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "grim_replay_bridge",
+  "version": "${version}",
+  "name": "Grim Replay Bridge",
+  "description": "Bounded server-side incident recorder",
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "xyz.grimreplay.ReplayMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.20.1",
+    "minecraft": "26.3",
+    "java": ">=25",
+    "fabric-api": "*"
+  },
+  "mixins": [
+    "grim-replay.mixins.json"
+  ]
+}

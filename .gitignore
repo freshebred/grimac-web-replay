@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+.gradle/
+.env
+.env.*
+!.env.example
+web-credential.json
+data/
+*.grimreplay
+*.log
+.agents/
+.codex/
+.taste-skill/
+shots/
+.DS_Store

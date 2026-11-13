@@ -1,0 +1,19 @@
+{
+  "name": "grim-replay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted Minecraft incident capture and browser replay",
+  "scripts": {
+    "setup": "npm --prefix server ci && npm --prefix web ci",
+    "build": "npm --prefix web run build",
+    "test": "npm --prefix server test && npm --prefix web test && node --test tests/*.test.mjs",
+    "start": "npm --prefix server start",
+    "dev:web": "npm --prefix web run dev",
+    "fixture": "node scripts/create-fixture.mjs",
+    "secrets": "node scripts/generate-secrets.mjs"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "license": "MIT"
+}
