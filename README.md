@@ -1,3 +1,4 @@
+(Yes this app is vibe-coded, don't disintegrate me. This only work when paired with the [jar mod found here](https://github.com/freshebred/grimac-web-replay-jar))
 # Grim Replay
 
 Self-hosted 3D incident capture and replay system for Fabric Minecraft servers running GrimAC.
