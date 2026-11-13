@@ -8,6 +8,9 @@ try{
  document.querySelector('#next').click();assert(document.querySelector('#tick').textContent==='Tick 1','Next tick');document.querySelector('#prev').click();assert(document.querySelector('#tick').textContent==='Tick 0','Previous tick');results.push('tick stepping');
  const slider=document.querySelector('#timeline');slider.value='60';slider.dispatchEvent(new Event('input'));assert(document.querySelector('#tick').textContent==='Tick 60','Seek60');slider.value='0';slider.dispatchEvent(new Event('input'));assert(document.querySelector('#tick').textContent==='Tick 0','Rewind');results.push('timeline forward and rewind');
  document.querySelector('[data-flag]').click();assert(document.querySelector('#tick').textContent==='Tick 50','Flag seek');results.push('flag seeking');
+ if(document.querySelector('[data-event]')){document.querySelector('[data-event]').click();results.push('combat and action event seeking');}
+ if(document.querySelector('#mode-video')){document.querySelector('#mode-video').click();assert(document.querySelector('#mode-video').getAttribute('aria-pressed')==='true','5-cam video mode');document.querySelector('#mode-3d').click();results.push('5-cam matrix and 3D mode switching');}
+ document.querySelector('[data-flag]').click();
  document.querySelector('#camera').click();assert(document.querySelector('#camera').getAttribute('aria-pressed')==='true','Follow');document.querySelector('#reset').click();results.push('follow camera and reset');
  document.querySelector('#play').click();await new Promise(r=>setTimeout(r,400));document.querySelector('#play').click();assert(Number(document.querySelector('#timeline').value)>50,'Playback');results.push('play and pause');
  assert(!document.querySelector('#delete'),'Local replay should not be deletable');results.push('local replay has no remote delete');

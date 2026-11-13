@@ -12,3 +12,13 @@ test('slabs, stairs and doors preserve principal state',()=>{assert.deepEqual(bo
 test('seek selects the last observed frame without inventing movement',()=>{assert.equal(frameAt(bundle().frames,10).tick,0);assert.equal(frameAt(bundle().frames,20).tick,20);});
 test('reject unsorted movement and unsupported schema',()=>{const b=bundle();b.frames.reverse();assert.throws(()=>validateBundle(b),/strictly ordered/);b.schemaVersion=2;assert.throws(()=>validateBundle(b),/unsupported/);});
 test('live terrain occupancy is bounded before allocating more blocks',()=>{const b=bundle();b.blockChanges=[{tick:5,x:1,y:64,z:0,state:'minecraft:stone'}];const w=new WorldTimeline(b,1);assert.throws(()=>w.seek(5),/browser limit/);assert.equal(w.blocks.size,1);});
+test('entities, action events and incremental section dirty tracking validate cleanly',()=>{
+ const b=bundle();
+ b.entities=[{id:'ent-1',type:'minecraft:player',name:'Rival',width:0.6,height:1.8,frames:[{tick:0,x:2,y:65,z:0,yaw:0,pitch:0,hurt:false},{tick:10,x:3,y:65,z:0,yaw:45,pitch:0,hurt:true}]}];
+ b.events=[{tick:5,type:'place',x:0,y:64,z:0,state:'minecraft:stone'},{tick:10,type:'attack',targetId:'ent-1',targetName:'Rival',distance:3.25,x:3,y:66,z:0}];
+ assert.equal(validateBundle(b).entities.length,1);
+ const w=new WorldTimeline(b);
+ w.seek(0);w.dirtySections.clear();w.fullReset=false;
+ w.seek(10);
+ assert.ok(w.dirtySections.has('0:0:4'));
+});

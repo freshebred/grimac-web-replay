@@ -18,6 +18,9 @@ public final class RecorderConfig {
     public int maxSectionVersions = 1024;
     public int maxBlockChanges = 50000;
     public int maxTrackedSections = 256;
+    public int entityRadius = 24;
+    public int maxEntities = 32;
+    public int maxEvents = 4096;
     public int queueCapacity = 4;
     public int maxSpoolMiB = 512;
     public int uploadRetries = 5;
@@ -29,6 +32,7 @@ public final class RecorderConfig {
         if(postSeconds>=historySeconds) throw new IllegalArgumentException("postSeconds must be smaller than historySeconds");
         range(verticalRadius,16,128,"verticalRadius"); range(sectionsPerTick,1,64,"sectionsPerTick");
         range(maxBlockChanges,1000,100000,"maxBlockChanges"); range(maxSectionVersions,128,2048,"maxSectionVersions"); range(maxTrackedSections,64,1024,"maxTrackedSections"); if(maxTrackedSections>maxSectionVersions)throw new IllegalArgumentException("maxTrackedSections must not exceed maxSectionVersions");
+        range(entityRadius,4,64,"entityRadius"); range(maxEntities,1,128,"maxEntities"); range(maxEvents,128,50000,"maxEvents");
         range(queueCapacity,1,16,"queueCapacity"); range(maxSpoolMiB,16,8192,"maxSpoolMiB"); range(uploadRetries,0,10,"uploadRetries");
     }
     static void range(int n,int lo,int hi,String key) { if(n<lo||n>hi) throw new IllegalArgumentException(key+" must be "+lo+".."+hi); }

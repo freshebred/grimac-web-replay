@@ -2,7 +2,7 @@
 
 ## Daily checks
 
-- Open dashboard Settings to check configured retention/capacity and storage usage.
+- Open dashboard Settings to check configured retention/capacity and storage usage (which accounts for both compressed `.grimreplay` bundles and rendered 5-camera `.mp4` videos).
 - Use Minecraft's `replay status` in console to check capture and upload state.
 - Inspect `docker compose logs --since=1h app` for ingestion/storage errors.
 - Monitor actual disk free space as well as the logical evidence limit. OS files, SQLite journals, and atomic replacement files need headroom beyond `MAX_STORAGE_BYTES`.

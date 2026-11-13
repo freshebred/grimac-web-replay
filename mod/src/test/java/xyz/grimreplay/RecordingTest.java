@@ -11,4 +11,21 @@ class RecordingTest {
  @Test void boundedHistoryDoesNotGrowWithChangingTerrain(){var r=recording();var c=new RecorderConfig();c.maxSectionVersions=128;for(int i=0;i<1000;i++)r.add(section(i,"minecraft:block"+i),c);assertEquals(128,r.versions);assertTrue(r.warnings.stream().anyMatch(w->w.contains("limit")));}
  @Test void downloadedSnapshotIsNotChangedByRingPruning(){var r=recording();var c=new RecorderConfig();r.add(section(1,"minecraft:air"),c);var before=r.sections.get("0:0:4").getFirst();r.changes.add(Map.of("tick",2L,"x",0,"y",64,"z",0,"state","minecraft:stone"));r.trim(3);assertEquals("minecraft:air",before.palette().get(before.indices()[0]));}
  @Test void unsafeConfigIsRejected(){var c=new RecorderConfig();c.apiUrl="http://example.com";assertThrows(IllegalArgumentException.class,c::validate);c.apiUrl="https://example.com";c.maxTrackedSections=500;c.maxSectionVersions=128;assertThrows(IllegalArgumentException.class,c::validate);}
+ @Test void entitiesAndEventsAreRecordedTrimmedAndExported(){
+  var r=recording();var c=new RecorderConfig();c.maxEntities=2;
+  r.frames.add(Map.of("tick",1L,"x",0.0,"y",64.0,"z",0.0,"yaw",0.0,"pitch",0.0,"pose","standing","onGround",true));
+  r.frames.add(Map.of("tick",5L,"x",1.0,"y",64.0,"z",0.0,"yaw",0.0,"pitch",0.0,"pose","standing","onGround",true));
+  r.recordEntity("e1","minecraft:player","Victim1",0.6,1.8,Map.of("tick",1L,"x",2.0,"y",64.0,"z",0.0,"yaw",90.0,"pitch",0.0,"hurt",false),c);
+  r.recordEntity("e2","minecraft:zombie","Zombie",0.6,1.95,Map.of("tick",5L,"x",3.0,"y",64.0,"z",0.0,"yaw",0.0,"pitch",0.0,"hurt",true),c);
+  r.recordEntity("e3","minecraft:skeleton","Skeleton",0.6,1.99,Map.of("tick",5L,"x",4.0,"y",64.0,"z",0.0,"yaw",0.0,"pitch",0.0,"hurt",false),c);
+  r.recordEvent(Map.of("tick",1L,"type","swing","x",0,"y",64,"z",0),c);
+  r.recordEvent(Map.of("tick",5L,"type","attack","targetId","e2","targetName","Zombie","distance",3.12),c);
+  assertEquals(2,r.entityFrames.size());
+  r.trim(3L);
+  var b=r.bundle("srv",5L,null);
+  var ents=(List<?>)b.get("entities");
+  var evs=(List<?>)b.get("events");
+  assertEquals(2,ents.size());
+  assertEquals(1,evs.size());
+ }
 }

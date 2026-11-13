@@ -7,6 +7,11 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
+import net.fabricmc.fabric.api.event.player.AttackEntityCallback;
+import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.fabricmc.fabric.api.event.player.UseItemCallback;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.arguments.EntityArgument;
@@ -15,8 +20,14 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.permissions.Permissions;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.nio.file.*;
@@ -46,6 +57,60 @@ public final class ReplayMod implements ModInitializer {
         ServerLifecycleEvents.SERVER_STARTED.register(s->{server=s;grimHook=new GrimHook(this,s);if(config.grimEvents)grimHook.install();uploader.retry(config);});
         ServerLifecycleEvents.SERVER_STOPPING.register(s->{for(var r:recordings.values())if(!r.frames.isEmpty()&&(r.manual||r.saveAt>=0))save(r,null);uploader.close();if(grimHook!=null)grimHook.close();});
         ServerTickEvents.END_SERVER_TICK.register(this::onTick);
+        AttackEntityCallback.EVENT.register((player,level,hand,entity,hitResult)->{
+            if(player instanceof ServerPlayer sp&&server!=null&&config.enabled&&server.isSameThread()){
+                var r=recordings.get(sp.getUUID());
+                if(r!=null){
+                    Vec3 eye=sp.getEyePosition();AABB box=entity.getBoundingBox();
+                    double cx=Math.clamp(eye.x,box.minX,box.maxX),cy=Math.clamp(eye.y,box.minY,box.maxY),cz=Math.clamp(eye.z,box.minZ,box.maxZ);
+                    double dist=Math.sqrt((eye.x-cx)*(eye.x-cx)+(eye.y-cy)*(eye.y-cy)+(eye.z-cz)*(eye.z-cz));
+                    var ev=new LinkedHashMap<String,Object>();
+                    ev.put("tick",Math.max(1L,tick));ev.put("type","attack");ev.put("targetId",entity.getUUID().toString());ev.put("targetName",entity.getName().getString());
+                    ev.put("distance",Math.round(dist*1000.0)/1000.0);ev.put("x",cx);ev.put("y",cy);ev.put("z",cz);
+                    r.recordEvent(ev,config);
+                }
+            }
+            return InteractionResult.PASS;
+        });
+        PlayerBlockBreakEvents.AFTER.register((level,player,pos,state,blockEntity)->{
+            if(player instanceof ServerPlayer sp&&server!=null&&config.enabled&&server.isSameThread()){
+                var r=recordings.get(sp.getUUID());
+                if(r!=null){
+                    String sName=stateNames.computeIfAbsent(state,this::stateName);
+                    r.recordEvent(Map.of("tick",Math.max(1L,tick),"type","break","x",pos.getX(),"y",pos.getY(),"z",pos.getZ(),"state",sName),config);
+                }
+            }
+        });
+        UseBlockCallback.EVENT.register((player,level,hand,hitResult)->{
+            if(player instanceof ServerPlayer sp&&server!=null&&config.enabled&&server.isSameThread()){
+                var r=recordings.get(sp.getUUID());
+                if(r!=null&&hitResult!=null){
+                    var item=sp.getItemInHand(hand).getItem();
+                    boolean placing=item instanceof BlockItem;
+                    var pos=placing?hitResult.getBlockPos().relative(hitResult.getDirection()):hitResult.getBlockPos();
+                    String sName=placing?BuiltInRegistries.BLOCK.getKey(((BlockItem)item).getBlock()).toString():stateNames.computeIfAbsent(level.getBlockState(hitResult.getBlockPos()),this::stateName);
+                    r.recordEvent(Map.of("tick",Math.max(1L,tick),"type",placing?"place":"interact","x",pos.getX(),"y",pos.getY(),"z",pos.getZ(),"state",sName),config);
+                }
+            }
+            return InteractionResult.PASS;
+        });
+        UseItemCallback.EVENT.register((player,level,hand)->{
+            if(player instanceof ServerPlayer sp&&server!=null&&config.enabled&&server.isSameThread()){
+                var r=recordings.get(sp.getUUID());
+                if(r!=null){
+                    String itemName=BuiltInRegistries.ITEM.getKey(sp.getItemInHand(hand).getItem()).toString();
+                    r.recordEvent(Map.of("tick",Math.max(1L,tick),"type","use_item","item",itemName),config);
+                }
+            }
+            return InteractionResult.PASS;
+        });
+        AttackBlockCallback.EVENT.register((player,level,hand,pos,direction)->{
+            if(player instanceof ServerPlayer sp&&server!=null&&config.enabled&&server.isSameThread()){
+                var r=recordings.get(sp.getUUID());
+                if(r!=null)r.recordEvent(Map.of("tick",Math.max(1L,tick),"type","swing","x",pos.getX(),"y",pos.getY(),"z",pos.getZ()),config);
+            }
+            return InteractionResult.PASS;
+        });
         CommandRegistrationCallback.EVENT.register((dispatcher,registry,environment)->{
             var root=Commands.literal("replay").requires(s->s.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER));
             root.executes(c->reply(c.getSource(),"/replay status | start/stop/save <player> | flag <player> <check> | reload | set <key> <value> | retry"));
@@ -85,11 +150,19 @@ public final class ReplayMod implements ModInitializer {
     void flag(UUID uuid,String check,double vl,String verbose){
         pendingFlags.offer(new FlagInput(uuid,check.substring(0,Math.min(check.length(),256)),Double.isFinite(vl)?vl:0,verbose.substring(0,Math.min(verbose.length(),4096))));
     }
+    private Map<String,Object> playerFrame(ServerPlayer p){
+        var fm=new LinkedHashMap<String,Object>();
+        fm.put("tick",tick);fm.put("x",p.getX());fm.put("y",p.getY());fm.put("z",p.getZ());fm.put("yaw",p.getYRot());fm.put("pitch",p.getXRot());
+        fm.put("pose",p.getPose().name().toLowerCase(Locale.ROOT));fm.put("onGround",p.onGround());
+        fm.put("swinging",p.isSwinging());fm.put("hurt",p.hurtTime>0);fm.put("using",p.isUsingItem());fm.put("sprinting",p.isSprinting());
+        fm.put("mainHand",BuiltInRegistries.ITEM.getKey(p.getMainHandItem().getItem()).toString());
+        return fm;
+    }
     private void drainFlags(){
         FlagInput f;while((f=pendingFlags.poll())!=null){
             var p=server.getPlayerList().getPlayer(f.uuid());if(p==null)continue;var r=getOrStart(p);
             if(r==null){LOG.warn("Flag missed: recorder player limit reached for {}",f.uuid());continue;}
-            if(r.frames.isEmpty())r.frames.add(Map.of("tick",tick,"x",p.getX(),"y",p.getY(),"z",p.getZ(),"yaw",p.getYRot(),"pitch",p.getXRot(),"pose",p.getPose().name().toLowerCase(Locale.ROOT),"onGround",p.onGround()));
+            if(r.frames.isEmpty())r.frames.add(playerFrame(p));
             if(r.flags.size()<128)r.flags.add(Map.of("tick",tick,"check",f.check(),"vl",f.vl(),"verbose",f.verbose()));
             if(r.saveAt<0){r.saveAt=tick+config.postSeconds*20L;r.frozenStart=tick-(config.historySeconds-config.postSeconds)*20L;}
         }
@@ -101,7 +174,23 @@ public final class ReplayMod implements ModInitializer {
         for(var it=recordings.entrySet().iterator();it.hasNext();){var entry=it.next();if(s.getPlayerList().getPlayer(entry.getKey())==null){if(entry.getValue().saveAt>=0||entry.getValue().manual)save(entry.getValue(),null);it.remove();}}
         if(config.autoRecord)for(var p:online)if(!paused.contains(p.getUUID()))getOrStart(p);
         for(var p:online){var r=recordings.get(p.getUUID());if(r==null)continue;r=getOrStart(p);if(r==null)continue;
-            r.frames.add(Map.of("tick",tick,"x",p.getX(),"y",p.getY(),"z",p.getZ(),"yaw",p.getYRot(),"pitch",p.getXRot(),"pose",p.getPose().name().toLowerCase(Locale.ROOT),"onGround",p.onGround()));
+            r.frames.add(playerFrame(p));
+            if(p.hurtTime>0&&r.lastHurtTime==0){
+                var attacker=p.getLastHurtByMob();
+                var ev=new LinkedHashMap<String,Object>();ev.put("tick",tick);ev.put("type","hurt");ev.put("x",p.getX());ev.put("y",p.getY());ev.put("z",p.getZ());
+                if(attacker!=null){ev.put("attackerId",attacker.getUUID().toString());ev.put("attackerName",attacker.getName().getString());}
+                r.recordEvent(ev,config);
+            }
+            r.lastHurtTime=p.hurtTime;
+            var nearby=p.level().getEntities(p,p.getBoundingBox().inflate(config.entityRadius),e->e.isAlive()&&!e.isSpectator());
+            if(nearby.size()>config.maxEntities)nearby.sort(Comparator.comparingDouble(p::distanceToSqr));
+            for(int i=0,lim=Math.min(nearby.size(),config.maxEntities);i<lim;i++){
+                Entity e=nearby.get(i);
+                String eType=BuiltInRegistries.ENTITY_TYPE.getKey(e.getType()).toString();
+                boolean eHurt=(e instanceof LivingEntity le)&&le.hurtTime>0;
+                r.recordEntity(e.getUUID().toString(),eType,e.getName().getString(),Math.max(0.1,e.getBbWidth()),Math.max(0.1,e.getBbHeight()),
+                    Map.of("tick",tick,"x",e.getX(),"y",e.getY(),"z",e.getZ(),"yaw",e.getYRot(),"pitch",e.getXRot(),"hurt",eHurt),config);
+            }
             r.trim(r.frozenStart>=0?Math.max(tick-2400,r.frozenStart):tick-config.historySeconds*20L);
         }
         drainFlags();

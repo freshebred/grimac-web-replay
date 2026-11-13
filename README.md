@@ -12,11 +12,13 @@ The system consists of two parts that run independently and communicate over HTT
 
 ## Architecture & Capabilities
 
-- **3×3 Chunk Rolling Capture:** Records loaded-world block states (including stair directions, slabs, doors) and server-side player movement/rotation/poses.
-- **Client-Side 3D Rendering:** Your VPS stores compressed `.grimreplay` files on disk and indexes metadata in SQLite. Decompression, 3D mesh construction, and timeline playback run in the admin's browser.
-- **Discord Allowlist Authentication:** Only Discord user IDs listed in `DISCORD_ALLOWED_IDS` can view incidents, attach logs, or download bundles.
-- **24-Hour Online Retention + Offline Archive:** Accepted recordings automatically expire after 24 hours. Admins can download self-contained `.grimreplay` files (which embed both the 3D world recording and any attached Grim log text) and drag-and-drop them back into the dashboard anytime in the future without re-uploading them to the VPS.
-- **Fidelity Scope:** Captures server-authoritative world state and movement. It does not reconstruct incidents prior to mod installation, does not represent a lagging client's unacknowledged packet view, and uses simplified generic block geometry rather than Mojang assets.
+- **3×3 Chunk Rolling Capture + Nearby Entities & Actions:** Records loaded-world block states (including stair directions, slabs, doors), server-side player movement/rotation/poses/held items, nearby entities within a configurable radius (`entityRadius`, default 24 blocks), and discrete combat/interaction events (entity hits with exact reach distance in blocks, damage/hurt states, arm swings, block placements, block breaks, and block/item interactions).
+- **Dual Playback Modes (Server-Rendered 5-Camera 3×3 MP4 + Fast Interactive 3D):**
+  - **5-Cam Video (3×3 Matrix):** Upon ingestion, the VPS renders a synchronized 3×3 composite MP4 in the background featuring **1st-Person POV** in the center (`2;2`), elevated 3rd-person cameras from **North**, **West**, **East**, and **South** around it, and 4 live telemetry HUD panels in the corners. If a moderator opens an incident before encoding completes, the UI notifies them and displays a live 5-camera 3×3 preview until the MP4 is ready.
+  - **Interactive 3D Mode:** Uses incremental 16×16×16 chunk-section meshes with hidden-face culling so block changes and timeline scrubbing run smoothly without rebuilding the entire world. Renders suspect and target hitboxes, hurt flashes, arm swings, reach raycast lines, and block interaction highlights.
+- **Discord Allowlist Authentication:** Only Discord user IDs listed in `DISCORD_ALLOWED_IDS` can view incidents, attach logs, stream videos, or download bundles.
+- **24-Hour Online Retention + Offline Archive:** Accepted recordings (and their rendered MP4 videos) automatically expire after 24 hours. Admins can download self-contained `.grimreplay` files (which embed the 3D world recording, entities, actions, and any attached Grim log text) and drag-and-drop them back into the dashboard anytime in the future without re-uploading them to the VPS.
+- **Fidelity Scope:** Captures server-authoritative world state, nearby entities, and server-observed interactions. It does not reconstruct incidents prior to mod installation, does not represent a lagging client's unacknowledged packet view, and uses simplified generic block geometry rather than Mojang assets.
 
 ## Project Layout
 

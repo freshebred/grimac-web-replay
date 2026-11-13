@@ -71,6 +71,9 @@ The public flag event does not supply the later published paste code or the comp
 | `maxSectionVersions` | `1024` | Section history cap per player, maximum 2048 |
 | `maxTrackedSections` | `256` | Distinct spatial sections retained per player; must not exceed versions |
 | `maxBlockChanges` | `50000` | Sparse mutation cap per player |
+| `entityRadius` | `24` | Radius in blocks around the player for sampling nearby entities (4..64) |
+| `maxEntities` | `32` | Maximum tracked nearby entities retained per player (1..128) |
+| `maxEvents` | `4096` | Maximum discrete interaction/combat events retained per player (128..50000) |
 | `queueCapacity` | `4` | Pending compression jobs plus one active worker; restart to change |
 | `maxSpoolMiB` | `512` | Local pending-upload disk limit |
 | `uploadRetries` | `5` | Retries per file, with bounded exponential backoff |
@@ -81,7 +84,7 @@ Capture reads loaded chunks only. It never loads/generates chunks or makes netwo
 
 After the first snapshot of a section, the recorder captures normal `LevelChunk.setBlockState` mutations, including placed/broken blocks and block-state properties. It retains exact tick order within a tick but does not provide sub-tick timings. It periodically rescans sections to catch differences outside normal mutation paths. Initial terrain is captured at individual section timestamps; it is not an atomic full-world snapshot. Moving into new terrain requires a new baseline. Direct section edits by other mods may bypass the mutation hook, and exhausted history/change limits produce warnings in the bundle. Terrain before its first baseline is unknown.
 
-The recorder captures server-authoritative position, yaw/pitch, pose, and grounded state once per server tick. Tick rate metadata is nominal20; wall time stretches when the server lags. It does not capture the player's packet-compensated view, inputs, predicted positions, nearby entity trajectories, inventories, chat, or resource-pack assets. A server-world replay alone is not proof of cheating. Dimensions are separate recordings; a dimension transition resets the ring and saves pending/manual evidence.
+The recorder captures server-authoritative position, yaw/pitch, pose, grounded state, arm swing, hurt state, item usage, sprinting state, and main-hand item once per server tick, alongside nearby entities within `entityRadius` (up to `maxEntities`) and discrete combat/interaction events (`attack` with eye-to-hitbox reach distance, `hurt`, `place`, `break`, `interact`, `use_item`, `swing`). Tick rate metadata is nominal 20; wall time stretches when the server lags. It does not capture the player's packet-compensated view, client-side predicted positions, full inventories, chat, or resource-pack assets. A server-world replay alone is not proof of cheating. Dimensions are separate recordings; a dimension transition resets the ring and saves pending/manual evidence.
 
 ## Verification before production use
 

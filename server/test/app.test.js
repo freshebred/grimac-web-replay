@@ -80,3 +80,19 @@ test('changing a paste code never attributes old text to the new paste',async t=
  const update=await fetch(`${f.url}/api/incidents/${b.id}/log`,{method:'PATCH',headers:{...f.admin,Origin:f.config.publicUrl,'Content-Type':'application/json'},body:JSON.stringify({code:'newPaste'})});assert.equal(update.status,200);
  const replay=await fetch(`${f.url}/api/incidents/${b.id}/bundle`,{headers:f.admin});const parsed=JSON.parse(gunzipSync(Buffer.from(await replay.arrayBuffer())));assert.deepEqual(parsed.grimLog,{code:'newPaste',text:null});
 });
+test('entities, action events and server 5-camera MP4 rendering lifecycle',async t=>{
+ const f=await fixture(t),b=bundle();
+ b.entities=[{id:'00000000-0000-4000-8000-000000000099',type:'minecraft:player',name:'Target',width:0.6,height:1.8,frames:[{tick:0,x:3,y:64,z:0,yaw:90,pitch:0,hurt:true}]}];
+ b.events=[{tick:5,type:'attack',targetId:'00000000-0000-4000-8000-000000000099',targetName:'Target',distance:3.1,x:2.7,y:65,z:0}];
+ assert.equal((await f.upload(b)).status,201);
+ await f.waitForVideo(b.id);
+ const meta=await (await fetch(`${f.url}/api/incidents/${b.id}`,{headers:f.admin})).json();
+ assert.equal(meta.videoStatus,'ready');
+ assert.equal(meta.videoReady,true);
+ const vid=await fetch(`${f.url}/api/incidents/${b.id}/video`,{headers:f.admin});
+ assert.equal(vid.status,200);
+ assert.match(vid.headers.get('content-type')||'',/video\/mp4/);
+ const mp4Bytes=Buffer.from(await vid.arrayBuffer());
+ assert.ok(mp4Bytes.length>64);
+ assert.equal(mp4Bytes.subarray(4,8).toString('ascii'),'ftyp');
+});

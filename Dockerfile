@@ -6,6 +6,7 @@ COPY web/ ./
 RUN npm run build
 
 FROM node:22-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 DATA_DIR=/data WEB_DIR=/app/web/dist
 WORKDIR /app/server
 COPY server/package*.json ./

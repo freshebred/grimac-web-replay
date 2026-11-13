@@ -1,10 +1,12 @@
 import express from 'express';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { gunzip, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
+import { stat, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { Store, hash } from './store.js';
 import { validateBundle, validCode } from './schema.js';
+import { renderReplayVideo } from './video.js';
 const unzip=promisify(gunzip), zip=promisify(gzip);
 const token=()=>randomBytes(32).toString('base64url');
 const error=(status,message)=>Object.assign(new Error(message),{status});
@@ -14,6 +16,36 @@ export function createApp(config, {now=Date.now,fetchImpl=fetch}={}) {
   const app=express(), store=new Store(config.dataDir,config.maxBytes,config.retentionHours,now);
   app.disable('x-powered-by');
   let busy=false;
+  const renderJobs=new Map();
+  let renderChain=Promise.resolve();
+  const enqueueVideo=(id,bundle)=>{
+    if(store.closed||renderJobs.has(id))return renderJobs.get(id);
+    const job=renderChain.then(async()=>{
+      if(store.closed)return;
+      const rec=store.get(id);
+      if(!rec||rec.videoStatus==='ready')return;
+      store.setVideoStatus(id,'rendering');
+      const vfile=`${randomUUID()}.mp4`,tmp=path.join(store.dir,`${vfile}.tmp`),dest=path.join(store.dir,vfile);
+      try{
+        const b=bundle||JSON.parse((await unzip(await store.read(rec),{maxOutputLength:config.maxExpandedBytes})).toString('utf8'));
+        await renderReplayVideo(b,tmp);
+        if(store.closed){await unlink(tmp).catch(()=>{});return;}
+        await rename(tmp,dest);
+        const info=await stat(dest);
+        await store.attachVideo(id,vfile,info.size);
+      }catch(e){
+        await unlink(tmp).catch(()=>{});
+        await unlink(dest).catch(()=>{});
+        store.setVideoStatus(id,'failed');
+      }finally{
+        renderJobs.delete(id);
+      }
+    });
+    renderChain=job.catch(()=>{});
+    renderJobs.set(id,job);
+    return job;
+  };
+  const waitForVideo=async id=>{const j=renderJobs.get(id);if(j)await j;};
   const exclusive=(req,res,next)=>{if(busy){res.set('Retry-After','2');return res.status(503).json({error:'Recording storage busy; retry shortly'});}busy=true;let released=false;const release=()=>{if(!released){released=true;busy=false;}};req.releaseMutation=release;res.once('finish',()=>{if(!req.mutationStarted)release();});res.once('close',()=>{if(!req.mutationStarted)release();});next();};
   const mutation=fn=>async(req,res,next)=>{req.mutationStarted=true;try{await fn(req,res);}catch(e){next(e);}finally{req.releaseMutation();}};
   const cookieOptions={httpOnly:true,secure:config.secure,sameSite:'lax',path:'/'};
@@ -22,7 +54,7 @@ export function createApp(config, {now=Date.now,fetchImpl=fetch}={}) {
   const session=(req,res,next)=>{const raw=cookies(req).replay_session;const record=raw&&store.db.prepare('SELECT user FROM sessions WHERE token=? AND expires>?').get(hash(raw),now());if(record){const user=JSON.parse(record.user);if(config.allowlist.includes(user.id))req.user=user;}next();};
   const admin=(req,res,next)=>req.user?next():res.status(401).json({error:'Discord login required'});
   const writer=(req,res,next)=>bearer(req)?next():admin(req,res,()=>origin(req,res,next));
-  app.use((req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",'Permissions-Policy':'camera=(), microphone=(), geolocation=()'});if(config.secure)res.set('Strict-Transport-Security','max-age=31536000');next();});
+  app.use((req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",'Permissions-Policy':'camera=(), microphone=(), geolocation=()'});if(config.secure)res.set('Strict-Transport-Security','max-age=31536000');next();});
   app.use(session);
   app.get('/healthz',(req,res)=>res.json({ok:true}));
   app.get('/auth/discord',(req,res)=>{
@@ -60,12 +92,21 @@ export function createApp(config, {now=Date.now,fetchImpl=fetch}={}) {
     if(!req.is('application/octet-stream'))throw error(415,'Use application/octet-stream');next();
   },raw,mutation(async(req,res)=>{
     let b;try{b=JSON.parse((await unzip(req.body,{maxOutputLength:config.maxExpandedBytes})).toString('utf8'));}catch{throw error(400,'Invalid gzip JSON or expanded size exceeded');}
-    validateBundle(b);await store.cleanup();res.status(201).json(await store.insert(b,req.body));
+    validateBundle(b);await store.cleanup();const inserted=await store.insert(b,req.body);if(!inserted.duplicate)enqueueVideo(b.id,b);res.status(201).json(inserted);
   }));
   app.get('/api/incidents',admin,(req,res)=>res.json({incidents:store.list(String(req.query.search||'').slice(0,200)),storage:{usedBytes:store.used(),maxBytes:config.maxBytes},retentionHours:config.retentionHours}));
   const lookup=req=>{const r=store.get(req.params.id);if(!r)throw error(404,'Recording missing or expired');return r;};
-  app.get('/api/incidents/:id',admin,(req,res)=>res.json(store.metadata(lookup(req))));
+  app.get('/api/incidents/:id',admin,(req,res)=>{const r=lookup(req);if(r.videoStatus==='pending')enqueueVideo(r.id,null);res.json(store.metadata(r));});
   app.get('/api/incidents/:id/bundle',admin,(req,res,next)=>{const r=lookup(req);res.set({'Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${r.id}.grimreplay"`});res.sendFile(path.join(store.dir,r.filename),{dotfiles:'deny'},err=>{if(err)next(err);});});
+  app.get('/api/incidents/:id/video',admin,(req,res,next)=>{
+    const r=lookup(req);
+    if(r.videoStatus!=='ready'||!r.videoFilename){
+      if(r.videoStatus==='pending')enqueueVideo(r.id,null);
+      return res.status(202).json({ready:false,videoStatus:r.videoStatus||'pending',error:'Server 5-camera video is not ready yet; rendering in progress.'});
+    }
+    res.set({'Content-Type':'video/mp4'});
+    res.sendFile(path.join(store.dir,r.videoFilename),{dotfiles:'deny'},err=>{if(err)next(err);});
+  });
   app.delete('/api/incidents/:id',admin,origin,exclusive,mutation(async(req,res)=>{lookup(req);await store.remove(req.params.id);res.json({ok:true});}));
   app.get('/api/resolve/:code',admin,async(req,res)=>{
     if(!validCode(req.params.code))throw error(400,'Invalid code');const r=store.resolve(req.params.code);
@@ -100,5 +141,5 @@ export function createApp(config, {now=Date.now,fetchImpl=fetch}={}) {
   app.get('/{*path}',(req,res,next)=>res.sendFile(path.join(config.webDir,'index.html'),err=>{if(err)next(err);}));
   app.use((err,req,res,next)=>{if(res.headersSent)return next(err);const status=err.status||500;if(status>=500)console.error('Request failed:',err.message);res.status(status).json({error:status===500?'Internal server error':err.message});});
   const cleanup=async()=>{if(busy)return;busy=true;try{await store.cleanup();}finally{busy=false;}};
-  return {app,store,cleanup};
+  return {app,store,cleanup,waitForVideo};
 }
