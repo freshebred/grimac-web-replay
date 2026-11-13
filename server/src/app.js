@@ -28,12 +28,13 @@ export function createApp(config, {now=Date.now,fetchImpl=fetch}={}) {
       const vfile=`${randomUUID()}.mp4`,tmp=path.join(store.dir,`${vfile}.tmp`),dest=path.join(store.dir,vfile);
       try{
         const b=bundle||JSON.parse((await unzip(await store.read(rec),{maxOutputLength:config.maxExpandedBytes})).toString('utf8'));
-        await renderReplayVideo(b,tmp);
+        await renderReplayVideo(b,tmp,()=>store.closed);
         if(store.closed){await unlink(tmp).catch(()=>{});return;}
         await rename(tmp,dest);
         const info=await stat(dest);
         await store.attachVideo(id,vfile,info.size);
       }catch(e){
+        if(!store.closed)console.warn(`Video encode unavailable for ${id} (${e.message}); client will use live 3x3 matrix.`);
         await unlink(tmp).catch(()=>{});
         await unlink(dest).catch(()=>{});
         store.setVideoStatus(id,'failed');
@@ -46,6 +47,10 @@ export function createApp(config, {now=Date.now,fetchImpl=fetch}={}) {
     return job;
   };
   const waitForVideo=async id=>{const j=renderJobs.get(id);if(j)await j;};
+  for(const row of store.db.prepare("SELECT id FROM incidents WHERE videoStatus IN ('pending','rendering') AND expiresAt>?").all(now())){
+    store.setVideoStatus(row.id,'pending');
+    enqueueVideo(row.id,null);
+  }
   const exclusive=(req,res,next)=>{if(busy){res.set('Retry-After','2');return res.status(503).json({error:'Recording storage busy; retry shortly'});}busy=true;let released=false;const release=()=>{if(!released){released=true;busy=false;}};req.releaseMutation=release;res.once('finish',()=>{if(!req.mutationStarted)release();});res.once('close',()=>{if(!req.mutationStarted)release();});next();};
   const mutation=fn=>async(req,res,next)=>{req.mutationStarted=true;try{await fn(req,res);}catch(e){next(e);}finally{req.releaseMutation();}};
   const cookieOptions={httpOnly:true,secure:config.secure,sameSite:'lax',path:'/'};
@@ -111,6 +116,7 @@ export function createApp(config, {now=Date.now,fetchImpl=fetch}={}) {
   app.get('/api/resolve/:code',admin,async(req,res)=>{
     if(!validCode(req.params.code))throw error(400,'Invalid code');const r=store.resolve(req.params.code);
     if(!r)return res.json({incident:null,log:null});
+    if(r.videoStatus==='pending')enqueueVideo(r.id,null);
     res.json({incident:store.metadata(r),log:null});
   });
   app.patch('/api/incidents/:id/log',writer,exclusive,express.json({limit:'2mb',inflate:false}),mutation(async(req,res)=>{

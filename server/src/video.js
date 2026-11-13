@@ -1,13 +1,32 @@
-import { spawn } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
+import { spawn, spawnSync } from 'node:child_process';
 
 export const VIDEO_W = 720;
 export const VIDEO_H = 540;
 const CELL_W = 240;
 const CELL_H = 180;
 
+let encoderKind;
+function getEncoderKind() {
+  if (encoderKind !== undefined) return encoderKind;
+  try {
+    if (spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0) {
+      encoderKind = 'ffmpeg';
+      return encoderKind;
+    }
+  } catch {}
+  try {
+    if (spawnSync('gst-launch-1.0', ['--version'], { stdio: 'ignore' }).status === 0) {
+      encoderKind = 'gst';
+      return encoderKind;
+    }
+  } catch {}
+  encoderKind = null;
+  return encoderKind;
+}
+
 const isAir = s => /:(?:air|cave_air|void_air)(?:\[|$)/.test(s);
 const key = (x, y, z) => `${x},${y},${z}`;
+const secKey = (x, y, z) => `${x >> 4}:${z >> 4}:${y >> 4}`;
 
 function parseState(state) {
   const [name, rest] = state.split('[');
@@ -66,9 +85,14 @@ function colorFor(s) {
   return c;
 }
 
+const fullCache = new Map();
 function isFullCube(state) {
+  let f = fullCache.get(state);
+  if (f !== undefined) return f;
   const b = boxesFor(state);
-  return b.length === 1 && b[0][0] === 0 && b[0][1] === 0 && b[0][2] === 0 && b[0][3] === 1 && b[0][4] === 1 && b[0][5] === 1;
+  f = b.length === 1 && b[0][0] === 0 && b[0][1] === 0 && b[0][2] === 0 && b[0][3] === 1 && b[0][4] === 1 && b[0][5] === 1;
+  fullCache.set(state, f);
+  return f;
 }
 
 function frameAt(frames, t) {
@@ -81,7 +105,6 @@ function frameAt(frames, t) {
   return frames[lo];
 }
 
-// Compact 5x7 uppercase bitmap font
 const FONT = {
   ' ': [0,0,0,0,0,0,0],
   '0': [14,17,19,21,25,17,14], '1': [4,12,4,4,4,4,14], '2': [14,17,1,6,8,16,31], '3': [31,2,4,6,1,17,14],
@@ -147,15 +170,12 @@ function strokeRect(rgb, x0, y0, w, h, r, g, b) {
 }
 
 function makeCamera(cx, cy, cz, fx, fy, fz, fovDeg = 68) {
-  // Forward vector
   let dx = fx - cx, dy = fy - cy, dz = fz - cz;
   const dl = Math.hypot(dx, dy, dz) || 1;
   dx /= dl; dy /= dl; dz /= dl;
-  // Right = normalize(cross(forward, up(0,1,0))) = normalize((-dz, 0, dx))
   let rx = -dz, ry = 0, rz = dx;
   const rl = Math.hypot(rx, rz) || 1;
   rx /= rl; rz /= rl;
-  // Up = cross(right, forward)
   const ux = ry * dz - rz * dy;
   const uy = rz * dx - rx * dz;
   const uz = rx * dy - ry * dx;
@@ -176,9 +196,9 @@ function projectPoint(cam, vx, vy, vz, xOff, yOff) {
 
 function drawLine2D(rgb, zbuf, xOff, yOff, p0, p1, r, g, b, ignoreDepth = false) {
   if (!p0 || !p1) return;
-  let x0 = p0.sx, y0 = p0.sy, z0 = p0.tz;
-  let x1 = p1.sx, y1 = p1.sy, z1 = p1.tz;
-  const steps = Math.min(400, Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0))));
+  const x0 = p0.sx, y0 = p0.sy, z0 = p0.tz;
+  const x1 = p1.sx, y1 = p1.sy, z1 = p1.tz;
+  const steps = Math.min(300, Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0))));
   const minX = xOff, maxX = xOff + CELL_W - 1;
   const minY = yOff, maxY = yOff + CELL_H - 1;
   for (let i = 0; i <= steps; i++) {
@@ -255,12 +275,13 @@ function drawWireBox(rgb, zbuf, cam, xOff, yOff, x0, y0, z0, x1, y1, z1, r, g, b
   for (const [a, e] of edges) drawLine2D(rgb, zbuf, xOff, yOff, corners[a], corners[e], r, g, b, ignoreDepth);
 }
 
-function extractVisibleFaces(blocks, px, py, pz, radius = 16) {
+function buildSectionFaces(blocks, sectionMap, sk) {
+  const keys = sectionMap.get(sk);
+  if (!keys || !keys.size) return [];
   const faces = [];
-  const r2 = radius * radius;
-  for (const b of blocks.values()) {
-    const dx = b.x + 0.5 - px, dy = b.y + 0.5 - py, dz = b.z + 0.5 - pz;
-    if (dx * dx + dy * dy + dz * dz > r2) continue;
+  for (const k of keys) {
+    const b = blocks.get(k);
+    if (!b) continue;
     const boxes = boxesFor(b.state);
     if (!boxes.length) continue;
     const hex = colorFor(b.state);
@@ -269,44 +290,63 @@ function extractVisibleFaces(blocks, px, py, pz, radius = 16) {
     for (const [ox, oy, oz, w, h, d] of boxes) {
       const x0 = b.x + ox, y0 = b.y + oy, z0 = b.z + oz;
       const x1 = x0 + w, y1 = y0 + h, z1 = z0 + d;
-      // +Y top
       if (!full || !blocks.has(key(b.x, b.y + 1, b.z)) || !isFullCube(blocks.get(key(b.x, b.y + 1, b.z)).state)) {
-        faces.push({ n: [0,1,0], v: [[x0,y1,z0],[x0,y1,z1],[x1,y1,z1],[x1,y1,z0]], r: Math.min(255, (cr * 1.12) | 0), g: Math.min(255, (cg * 1.12) | 0), b: Math.min(255, (cb * 1.12) | 0) });
+        faces.push({ bx: b.x, by: b.y, bz: b.z, n: [0,1,0], v: [[x0,y1,z0],[x0,y1,z1],[x1,y1,z1],[x1,y1,z0]], r: Math.min(255, (cr * 1.12) | 0), g: Math.min(255, (cg * 1.12) | 0), b: Math.min(255, (cb * 1.12) | 0) });
       }
-      // -Y bottom
       if (!full || !blocks.has(key(b.x, b.y - 1, b.z)) || !isFullCube(blocks.get(key(b.x, b.y - 1, b.z)).state)) {
-        faces.push({ n: [0,-1,0], v: [[x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1]], r: (cr * 0.58) | 0, g: (cg * 0.58) | 0, b: (cb * 0.58) | 0 });
+        faces.push({ bx: b.x, by: b.y, bz: b.z, n: [0,-1,0], v: [[x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1]], r: (cr * 0.58) | 0, g: (cg * 0.58) | 0, b: (cb * 0.58) | 0 });
       }
-      // -Z north
       if (!full || !blocks.has(key(b.x, b.y, b.z - 1)) || !isFullCube(blocks.get(key(b.x, b.y, b.z - 1)).state)) {
-        faces.push({ n: [0,0,-1], v: [[x0,y0,z0],[x0,y1,z0],[x1,y1,z0],[x1,y0,z0]], r: (cr * 0.88) | 0, g: (cg * 0.88) | 0, b: (cb * 0.88) | 0 });
+        faces.push({ bx: b.x, by: b.y, bz: b.z, n: [0,0,-1], v: [[x0,y0,z0],[x0,y1,z0],[x1,y1,z0],[x1,y0,z0]], r: (cr * 0.88) | 0, g: (cg * 0.88) | 0, b: (cb * 0.88) | 0 });
       }
-      // +Z south
       if (!full || !blocks.has(key(b.x, b.y, b.z + 1)) || !isFullCube(blocks.get(key(b.x, b.y, b.z + 1)).state)) {
-        faces.push({ n: [0,0,1], v: [[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]], r: (cr * 0.92) | 0, g: (cg * 0.92) | 0, b: (cb * 0.92) | 0 });
+        faces.push({ bx: b.x, by: b.y, bz: b.z, n: [0,0,1], v: [[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]], r: (cr * 0.92) | 0, g: (cg * 0.92) | 0, b: (cb * 0.92) | 0 });
       }
-      // -X west
       if (!full || !blocks.has(key(b.x - 1, b.y, b.z)) || !isFullCube(blocks.get(key(b.x - 1, b.y, b.z)).state)) {
-        faces.push({ n: [-1,0,0], v: [[x0,y0,z0],[x0,y0,z1],[x0,y1,z1],[x0,y1,z0]], r: (cr * 0.76) | 0, g: (cg * 0.76) | 0, b: (cb * 0.76) | 0 });
+        faces.push({ bx: b.x, by: b.y, bz: b.z, n: [-1,0,0], v: [[x0,y0,z0],[x0,y0,z1],[x0,y1,z1],[x0,y1,z0]], r: (cr * 0.76) | 0, g: (cg * 0.76) | 0, b: (cb * 0.76) | 0 });
       }
-      // +X east
       if (!full || !blocks.has(key(b.x + 1, b.y, b.z)) || !isFullCube(blocks.get(key(b.x + 1, b.y, b.z)).state)) {
-        faces.push({ n: [1,0,0], v: [[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]], r: (cr * 0.8) | 0, g: (cg * 0.8) | 0, b: (cb * 0.8) | 0 });
+        faces.push({ bx: b.x, by: b.y, bz: b.z, n: [1,0,0], v: [[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]], r: (cr * 0.8) | 0, g: (cg * 0.8) | 0, b: (cb * 0.8) | 0 });
       }
     }
   }
   return faces;
 }
 
+function gatherNearbyFaces(blocks, sectionMap, sectionFacesCache, dirtySections, px, py, pz, radius = 14) {
+  const minCx = (Math.floor(px - radius)) >> 4, maxCx = (Math.ceil(px + radius)) >> 4;
+  const minCy = (Math.floor(py - radius)) >> 4, maxCy = (Math.ceil(py + radius)) >> 4;
+  const minCz = (Math.floor(pz - radius)) >> 4, maxCz = (Math.ceil(pz + radius)) >> 4;
+  const r2 = radius * radius;
+  const out = [];
+  for (let cx = minCx; cx <= maxCx; cx++) {
+    for (let cz = minCz; cz <= maxCz; cz++) {
+      for (let cy = minCy; cy <= maxCy; cy++) {
+        const sk = `${cx}:${cz}:${cy}`;
+        if (!sectionMap.has(sk)) continue;
+        let secFaces = sectionFacesCache.get(sk);
+        if (!secFaces || dirtySections.has(sk)) {
+          secFaces = buildSectionFaces(blocks, sectionMap, sk);
+          sectionFacesCache.set(sk, secFaces);
+          dirtySections.delete(sk);
+        }
+        for (let i = 0; i < secFaces.length; i++) {
+          const face = secFaces[i];
+          const dx = face.bx + 0.5 - px, dy = face.by + 0.5 - py, dz = face.bz + 0.5 - pz;
+          if (dx * dx + dy * dy + dz * dz <= r2) out.push(face);
+        }
+      }
+    }
+  }
+  return out;
+}
+
 function renderViewport(rgb, zbuf, col, row, label, cam, isFirstPerson, faces, playerState, activeEntities, recentEvents) {
   const xOff = col * CELL_W, yOff = row * CELL_H;
-  // Clear viewport sky/ground gradient + z-buffer
   for (let y = 0; y < CELL_H; y++) {
     const py = yOff + y;
     const sky = y < CELL_H * 0.45;
-    const r = sky ? 19 : 23;
-    const g = sky ? 33 : 40;
-    const b = sky ? 24 : 29;
+    const r = sky ? 19 : 23, g = sky ? 33 : 40, b = sky ? 24 : 29;
     let idx = (py * VIDEO_W + xOff) * 3;
     let zIdx = py * VIDEO_W + xOff;
     for (let x = 0; x < CELL_W; x++) {
@@ -316,7 +356,6 @@ function renderViewport(rgb, zbuf, col, row, label, cam, isFirstPerson, faces, p
     }
   }
 
-  // Render visible terrain faces facing the camera
   for (let i = 0; i < faces.length; i++) {
     const face = faces[i];
     const v0 = face.v[0];
@@ -325,7 +364,6 @@ function renderViewport(rgb, zbuf, col, row, label, cam, isFirstPerson, faces, p
     drawQuad3D(rgb, zbuf, cam, xOff, yOff, face.v[0], face.v[1], face.v[2], face.v[3], face.r, face.g, face.b);
   }
 
-  // Highlight recent block changes / interactions
   for (const ev of recentEvents) {
     if ((ev.type === 'place' || ev.type === 'break' || ev.type === 'interact') && ev.x != null) {
       const [hr, hg, hb] = ev.type === 'place' ? [92, 225, 230] : ev.type === 'break' ? [255, 92, 92] : [255, 209, 102];
@@ -333,7 +371,6 @@ function renderViewport(rgb, zbuf, col, row, label, cam, isFirstPerson, faces, p
     }
   }
 
-  // Render nearby entities (in all 5 cameras!)
   for (const ent of activeEntities) {
     const hw = ent.width * 0.5;
     const [er, eg, eb] = ent.hurt ? [255, 65, 65] : ent.type === 'minecraft:player' ? [92, 225, 230] : [245, 185, 66];
@@ -348,23 +385,18 @@ function renderViewport(rgb, zbuf, col, row, label, cam, isFirstPerson, faces, p
     }
   }
 
-  // Render suspect player (in 3rd-person cameras)
   const { f, h, eyeY, lookX, lookY, lookZ, isHurt, isSwinging } = playerState;
   if (!isFirstPerson) {
     const [pr, pg, pb] = isHurt ? [255, 82, 82] : [198, 241, 157];
     drawWireBox(rgb, zbuf, cam, xOff, yOff, f.x - 0.3, f.y, f.z - 0.3, f.x + 0.3, f.y + h, f.z + 0.3, pr, pg, pb, true);
-    // Head box
     drawWireBox(rgb, zbuf, cam, xOff, yOff, f.x - 0.22, eyeY - 0.2, f.z - 0.22, f.x + 0.22, eyeY + 0.22, f.z + 0.22, pr, pg, pb, true);
-    // Look ray
     drawLine3D(rgb, zbuf, cam, xOff, yOff, f.x, eyeY, f.z, f.x + lookX * 1.8, eyeY + lookY * 1.8, f.z + lookZ * 1.8, 255, 235, 120, true);
-    // Swing indicator
     if (isSwinging) {
       const sx = f.x + lookX * 0.75, sy = eyeY - 0.25 + lookY * 0.75, sz = f.z + lookZ * 0.75;
       drawWireBox(rgb, zbuf, cam, xOff, yOff, sx - 0.18, sy - 0.18, sz - 0.18, sx + 0.18, sy + 0.18, sz + 0.18, 255, 165, 50, true);
     }
   }
 
-  // Render attack / reach raycast lines in all cameras
   for (const ev of recentEvents) {
     if (ev.type === 'attack' && ev.x != null) {
       drawLine3D(rgb, zbuf, cam, xOff, yOff, f.x, eyeY, f.z, ev.x, ev.y, ev.z, 255, 70, 70, true);
@@ -372,7 +404,6 @@ function renderViewport(rgb, zbuf, col, row, label, cam, isFirstPerson, faces, p
     }
   }
 
-  // 1st-Person POV crosshair & hand status
   if (isFirstPerson) {
     const cx = xOff + (CELL_W >> 1), cy = yOff + (CELL_H >> 1);
     const hitActive = recentEvents.some(e => e.type === 'attack');
@@ -385,7 +416,6 @@ function renderViewport(rgb, zbuf, col, row, label, cam, isFirstPerson, faces, p
     }
   }
 
-  // Top label bar for the camera cell
   fillRect(rgb, xOff, yOff, CELL_W, 14, 15, 31, 16);
   drawText(rgb, xOff + 6, yOff + 4, label, 198, 241, 157, xOff + CELL_W - 4);
   strokeRect(rgb, xOff, yOff, CELL_W, CELL_H, 52, 71, 53);
@@ -405,7 +435,7 @@ function renderCornerHud(rgb, col, row, title, lines, accent = [198, 241, 157]) 
   strokeRect(rgb, xOff, yOff, CELL_W, CELL_H, 52, 71, 53);
 }
 
-export function renderFramePixels(bundle, blocks, tick, rgb, zbuf) {
+export function renderFramePixels(bundle, faces, tick, rgb, zbuf) {
   const f = frameAt(bundle.frames, tick);
   const h = /swimming|fall_flying|sleeping/.test(f.pose) ? 0.6 : /crouching|sneaking/.test(f.pose) ? 1.5 : 1.8;
   const eyeY = f.y + h * 0.9;
@@ -420,7 +450,6 @@ export function renderFramePixels(bundle, blocks, tick, rgb, zbuf) {
   const isSwinging = Boolean(f.swinging || recentEvents.some(ev => (ev.type === 'attack' || ev.type === 'swing') && ev.tick >= tick - 3));
   const playerState = { f, h, eyeY, lookX, lookY, lookZ, isHurt, isSwinging };
 
-  // Active nearby entities at tick
   const activeEntities = [];
   for (const e of bundle.entities || []) {
     if (!e.frames?.length) continue;
@@ -442,19 +471,11 @@ export function renderFramePixels(bundle, blocks, tick, rgb, zbuf) {
   }
   activeEntities.sort((a, b) => a.dist - b.dist);
 
-  const faces = extractVisibleFaces(blocks, f.x, f.y + 0.9, f.z, 15);
   const targetY = f.y + 0.75;
-
-  // 5 Cameras in 3x3 cross matrix:
-  // (0,1) Top-Center: NORTH 3rd Person (camera at Z - 5.2, Y + 3.6, looking South-Down at player)
   const camNorth = makeCamera(f.x, f.y + 3.6, f.z - 5.2, f.x, targetY, f.z, 62);
-  // (1,0) Middle-Left: WEST 3rd Person (camera at X - 5.2, Y + 3.6, looking East-Down at player)
   const camWest = makeCamera(f.x - 5.2, f.y + 3.6, f.z, f.x, targetY, f.z, 62);
-  // (1,1) Center (2;2): 1st Person POV (synced to player eye & look direction)
   const camPov = makeCamera(f.x, eyeY, f.z, f.x + lookX, eyeY + lookY, f.z + lookZ, 72);
-  // (1,2) Middle-Right: EAST 3rd Person (camera at X + 5.2, Y + 3.6, looking West-Down at player)
   const camEast = makeCamera(f.x + 5.2, f.y + 3.6, f.z, f.x, targetY, f.z, 62);
-  // (2,1) Bottom-Center: SOUTH 3rd Person (camera at Z + 5.2, Y + 3.6, looking North-Down at player)
   const camSouth = makeCamera(f.x, f.y + 3.6, f.z + 5.2, f.x, targetY, f.z, 62);
 
   renderViewport(rgb, zbuf, 1, 0, 'NORTH 3RD PERSON (-Z)', camNorth, false, faces, playerState, activeEntities, recentEvents);
@@ -463,7 +484,6 @@ export function renderFramePixels(bundle, blocks, tick, rgb, zbuf) {
   renderViewport(rgb, zbuf, 2, 1, 'EAST 3RD PERSON (+X)', camEast, false, faces, playerState, activeEntities, recentEvents);
   renderViewport(rgb, zbuf, 1, 2, 'SOUTH 3RD PERSON (+Z)', camSouth, false, faces, playerState, activeEntities, recentEvents);
 
-  // Corner (0,0): Player Telemetry
   const handName = (f.mainHand || 'main_hand').replace(/^minecraft:/, '');
   renderCornerHud(rgb, 0, 0, 'PLAYER TELEMETRY', [
     `PLAYER: ${bundle.player.name}`,
@@ -481,7 +501,6 @@ export function renderFramePixels(bundle, blocks, tick, rgb, zbuf) {
     }
   ]);
 
-  // Corner (2,0): Nearby Entities
   const entLines = activeEntities.length
     ? activeEntities.slice(0, 5).flatMap(e => [
         { text: `${e.name.slice(0, 14)} (${e.dist.toFixed(2)}M)`, color: e.hurt ? [255, 95, 95] : [92, 225, 230] },
@@ -490,7 +509,6 @@ export function renderFramePixels(bundle, blocks, tick, rgb, zbuf) {
     : ['NO OTHER ENTITIES IN', 'LOADED CAPTURE RADIUS'];
   renderCornerHud(rgb, 2, 0, `ENTITIES NEARBY (${activeEntities.length})`, entLines, [92, 225, 230]);
 
-  // Corner (0,2): Combat & Block Actions
   const pastEvents = events.filter(ev => ev.tick <= tick).slice(-8).reverse();
   const actLines = pastEvents.length
     ? pastEvents.map(ev => {
@@ -509,7 +527,6 @@ export function renderFramePixels(bundle, blocks, tick, rgb, zbuf) {
     : ['NO ACTIONS YET AT TICK'];
   renderCornerHud(rgb, 0, 2, 'ACTIONS & INTERACTIONS', actLines, [255, 215, 110]);
 
-  // Corner (2,2): Grim Flags
   const flags = (bundle.flags || []).filter(fl => fl.tick <= tick + 5).slice(-7).reverse();
   const flagLines = flags.length
     ? flags.map(fl => ({
@@ -520,8 +537,9 @@ export function renderFramePixels(bundle, blocks, tick, rgb, zbuf) {
   renderCornerHud(rgb, 2, 2, `GRIM FLAGS (${bundle.flags?.length || 0})`, flagLines, [242, 188, 176]);
 }
 
-function tryEncodeWithProcess(cmd, args, framesBuffer) {
+function encodeFrames(cmd, args, frames, isCancelled) {
   return new Promise((resolve, reject) => {
+    if (isCancelled?.()) return reject(new Error('Render cancelled'));
     const proc = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'pipe'] });
     let stderr = '';
     proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
@@ -531,29 +549,26 @@ function tryEncodeWithProcess(cmd, args, framesBuffer) {
       if (code === 0) resolve();
       else reject(new Error(`${cmd} exited with ${code}: ${stderr.slice(0, 240)}`));
     });
-    proc.stdin.end(framesBuffer);
+    let i = 0;
+    function writeNext() {
+      if (isCancelled?.()) { proc.kill('SIGKILL'); return; }
+      while (i < frames.length) {
+        const ok = proc.stdin.write(frames[i++]);
+        if (!ok) {
+          proc.stdin.once('drain', writeNext);
+          return;
+        }
+      }
+      proc.stdin.end();
+    }
+    writeNext();
   });
 }
 
-// Minimal uncompressed/MJPEG fallback container if neither ffmpeg nor gst-launch-1.0 is installed
-function buildFallbackMp4(framesBuffer, frameCount, fps) {
-  // Valid ISO BMFF MP4 header + mdat box so binary stream checks and downloads succeed even without external encoders
-  const mdatSize = 8 + framesBuffer.length;
-  const ftyp = Buffer.from([
-    0,0,0,24, 0x66,0x74,0x79,0x70, 0x69,0x73,0x6f,0x6d, 0,0,2,0, 0x69,0x73,0x6f,0x6d, 0x6d,0x70,0x34,0x31
-  ]);
-  const mdatHeader = Buffer.alloc(8);
-  mdatHeader.writeUInt32BE(mdatSize >>> 0, 0);
-  mdatHeader.write('mdat', 4, 'ascii');
-  const meta = Buffer.from(`GRIMREPLAY_VIDEO_FRAMES:${frameCount}:${fps}:${VIDEO_W}x${VIDEO_H}`);
-  const freeHeader = Buffer.alloc(8);
-  freeHeader.writeUInt32BE(8 + meta.length, 0);
-  freeHeader.write('free', 4, 'ascii');
-  return Buffer.concat([ftyp, freeHeader, meta, mdatHeader, framesBuffer]);
-}
+export async function renderReplayVideo(bundle, outputPath, isCancelled = () => false) {
+  const kind = getEncoderKind();
+  if (!kind) throw new Error('Neither ffmpeg nor gst-launch-1.0 is installed');
 
-export async function renderReplayVideo(bundle, outputPath) {
-  // Build timeline state (same lifting of first-seen chunk sections as WorldTimeline)
   const seen = new Set(), early = [], rest = [];
   for (const s of bundle.snapshots) {
     const earlyChunks = [], restChunks = [];
@@ -568,13 +583,49 @@ export async function renderReplayVideo(bundle, outputPath) {
       if (restSecs.length) restChunks.push({ x: c.x, z: c.z, sections: restSecs });
     }
     if (earlyChunks.length) early.push({ tick: bundle.startTick, chunks: earlyChunks });
-    if (restChunks.length) rest.push({ tick: s.tick, chunks: restChunks });
+    if (restChunks.length) rest.push({ tick: s.tick, chunks: restSecs });
   }
   const snapshots = [...early, ...rest].sort((a, b) => a.tick - b.tick);
+
   const blocks = new Map();
+  const sectionMap = new Map();
+  const sectionFacesCache = new Map();
+  const dirtySections = new Set();
   let si = 0, ci = 0;
 
-  function advanceTo(t) {
+  const markDirty = (x, y, z) => {
+    const cx = x >> 4, cy = y >> 4, cz = z >> 4;
+    dirtySections.add(`${cx}:${cz}:${cy}`);
+    if ((x & 15) === 0) dirtySections.add(`${cx - 1}:${cz}:${cy}`);
+    if ((x & 15) === 15) dirtySections.add(`${cx + 1}:${cz}:${cy}`);
+    if ((y & 15) === 0) dirtySections.add(`${cx}:${cz}:${cy - 1}`);
+    if ((y & 15) === 15) dirtySections.add(`${cx}:${cz}:${cy + 1}`);
+    if ((z & 15) === 0) dirtySections.add(`${cx}:${cz - 1}:${cy}`);
+    if ((z & 15) === 15) dirtySections.add(`${cx}:${cz + 1}:${cy}`);
+  };
+
+  const putBlock = (x, y, z, state) => {
+    const k = key(x, y, z);
+    const prev = blocks.get(k);
+    if (prev && prev.state === state) return;
+    blocks.set(k, { x, y, z, state });
+    const sk = secKey(x, y, z);
+    let s = sectionMap.get(sk);
+    if (!s) { s = new Set(); sectionMap.set(sk, s); }
+    s.add(k);
+    markDirty(x, y, z);
+  };
+
+  const delBlock = (x, y, z) => {
+    const k = key(x, y, z);
+    if (!blocks.delete(k)) return;
+    const sk = secKey(x, y, z);
+    const s = sectionMap.get(sk);
+    if (s) { s.delete(k); if (!s.size) sectionMap.delete(sk); }
+    markDirty(x, y, z);
+  };
+
+  const advanceTo = t => {
     while (true) {
       const st = snapshots[si]?.tick ?? Infinity;
       const ct = bundle.blockChanges[ci]?.tick ?? Infinity;
@@ -584,25 +635,23 @@ export async function renderReplayVideo(bundle, outputPath) {
         for (const c of s.chunks) {
           for (const sec of c.sections) {
             for (let i = 0; i < 4096; i++) {
+              const state = sec.palette[sec.indices[i]];
               const x = c.x * 16 + (i & 15), y = sec.y * 16 + (i >> 8), z = c.z * 16 + ((i >> 4) & 15);
-              const k = key(x, y, z), state = sec.palette[sec.indices[i]];
-              if (isAir(state)) blocks.delete(k);
-              else blocks.set(k, { x, y, z, state });
+              if (isAir(state)) delBlock(x, y, z);
+              else putBlock(x, y, z, state);
             }
           }
         }
       } else {
         const c = bundle.blockChanges[ci++];
-        const k = key(c.x, c.y, c.z);
-        if (isAir(c.state)) blocks.delete(k);
-        else blocks.set(k, c);
+        if (isAir(c.state)) delBlock(c.x, c.y, c.z);
+        else putBlock(c.x, c.y, c.z, c.state);
       }
     }
-  }
+  };
 
   const totalTicks = Math.max(1, bundle.endTick - bundle.startTick + 1);
-  // Keep video frame count bounded (max 300 frames) for fast background VPS encoding
-  const step = Math.max(1, Math.ceil(totalTicks / 300));
+  const step = Math.max(1, Math.ceil(totalTicks / 150));
   const fps = Math.max(1, Math.round(bundle.tickRate / step));
   const frameBytes = VIDEO_W * VIDEO_H * 3;
   const frames = [];
@@ -610,28 +659,25 @@ export async function renderReplayVideo(bundle, outputPath) {
 
   let count = 0;
   for (let t = bundle.startTick; t <= bundle.endTick; t += step) {
+    if (isCancelled()) throw new Error('Render cancelled');
     advanceTo(t);
+    const f = frameAt(bundle.frames, t);
+    const faces = gatherNearbyFaces(blocks, sectionMap, sectionFacesCache, dirtySections, f.x, f.y + 0.9, f.z, 14);
     const rgb = Buffer.allocUnsafe(frameBytes);
-    renderFramePixels(bundle, blocks, t, rgb, zbuf);
+    renderFramePixels(bundle, faces, t, rgb, zbuf);
     frames.push(rgb);
-    if (++count % 10 === 0) await new Promise(r => setImmediate(r));
+    if (++count % 8 === 0) await new Promise(r => setImmediate(r));
   }
 
-  const rawVideo = Buffer.concat(frames);
-
-  // Try ffmpeg first, then gst-launch-1.0, then pure-JS fallback
-  try {
-    await tryEncodeWithProcess('ffmpeg', [
+  if (kind === 'ffmpeg') {
+    await encodeFrames('ffmpeg', [
       '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', `${VIDEO_W}x${VIDEO_H}`,
       '-r', String(fps), '-i', 'pipe:0',
       '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26',
       '-pix_fmt', 'yuv420p', '-movflags', '+faststart', outputPath
-    ], rawVideo);
-    return;
-  } catch {}
-
-  try {
-    await tryEncodeWithProcess('gst-launch-1.0', [
+    ], frames, isCancelled);
+  } else {
+    await encodeFrames('gst-launch-1.0', [
       '-q', 'fdsrc', 'fd=0',
       '!', 'rawvideoparse', 'use-sink-caps=false', `width=${VIDEO_W}`, `height=${VIDEO_H}`, 'format=rgb', `framerate=${fps}/1`,
       '!', 'videoconvert',
@@ -640,9 +686,6 @@ export async function renderReplayVideo(bundle, outputPath) {
       '!', 'h264parse',
       '!', 'mp4mux', 'faststart=true',
       '!', 'filesink', `location=${outputPath}`
-    ], rawVideo);
-    return;
-  } catch {}
-
-  await writeFile(outputPath, buildFallbackMp4(rawVideo, frames.length, fps));
+    ], frames, isCancelled);
+  }
 }

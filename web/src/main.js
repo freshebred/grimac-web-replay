@@ -109,15 +109,34 @@ async function showReplay(bundle,meta){
 
   const attachServerVideo=()=>{
    if(!meta?.videoReady||videoEl)return;
-   videoEl=document.createElement('video');
-   videoEl.id='server-video';
-   videoEl.className='server-video';
-   videoEl.src=`/api/incidents/${encodeURIComponent(meta.id)}/video`;
-   videoEl.muted=true;
-   videoEl.playsInline=true;
-   videoEl.preload='auto';
-   stage.prepend(videoEl);
-   if(usingVideoMode)viewer.renderer.domElement.style.display='none';
+   const v=document.createElement('video');
+   v.id='server-video';
+   v.className='server-video';
+   v.src=`/api/incidents/${encodeURIComponent(meta.id)}/video`;
+   v.muted=true;
+   v.playsInline=true;
+   v.preload='auto';
+   v.style.display='none';
+   v.addEventListener('loadedmetadata',()=>{try{v.currentTime=Math.max(0.001,(viewer.tick-bundle.startTick)/bundle.tickRate);}catch{}});
+   v.addEventListener('loadeddata',()=>{
+    if(usingVideoMode&&videoEl===v){
+     v.style.display='block';
+     viewer.renderer.domElement.style.display='none';
+    }
+   });
+   v.addEventListener('error',()=>{
+    if(videoEl===v){
+     v.remove();
+     videoEl=null;
+     meta.videoReady=false;
+     meta.videoStatus='failed';
+     viewer.renderer.domElement.style.display='block';
+     syncBanner();
+     viewer.draw();
+    }
+   });
+   videoEl=v;
+   stage.prepend(v);
   };
 
   const syncBanner=()=>{
@@ -130,7 +149,7 @@ async function showReplay(bundle,meta){
     banner.textContent='Playing server-rendered 5-camera 3×3 MP4 footage (N, W, 1st-Person POV at 2;2, E, S).';
     attachServerVideo();
    }else if(meta.videoStatus==='failed'){
-    banner.textContent='Server MP4 encoding unavailable; displaying live 5-camera 3×3 matrix fallback.';
+    banner.textContent='Server MP4 encoding unavailable on VPS (install ffmpeg); displaying live 5-camera 3×3 matrix.';
    }else{
     banner.textContent=`Server 5-camera MP4 footage is not ready yet (${meta.videoStatus||'rendering'} on VPS)… Showing live 5-camera 3×3 preview until ready.`;
    }
@@ -144,6 +163,7 @@ async function showReplay(bundle,meta){
     meta.videoReady=latest.videoReady;
     syncBanner();
     if(meta.videoReady){notify('Server 5-camera MP4 footage is now ready.');return;}
+    if(meta.videoStatus==='failed')return;
    }catch{}
    videoPollTimer=setTimeout(pollVideoStatus,1500);
   };
@@ -159,20 +179,25 @@ async function showReplay(bundle,meta){
    viewer.matrixMode=videoMode;
    if(videoMode&&meta?.videoReady){
     attachServerVideo();
-    if(videoEl)videoEl.style.display='block';
-    viewer.renderer.domElement.style.display='none';
+    if(videoEl&&videoEl.readyState>=2){
+     videoEl.style.display='block';
+     viewer.renderer.domElement.style.display='none';
+    }else{
+     viewer.renderer.domElement.style.display='block';
+    }
    }else{
     if(videoEl)videoEl.style.display='none';
     viewer.renderer.domElement.style.display='block';
    }
    syncBanner();
-   if(videoMode&&meta&&!meta.videoReady)pollVideoStatus();
+   if(videoMode&&meta&&!meta.videoReady&&meta.videoStatus!=='failed')pollVideoStatus();
    viewer.seek(viewer.tick);
   };
 
   document.querySelectorAll('.transport button,.transport input,.transport select,.camera-tools button,[data-flag],[data-event],[data-entity]').forEach(b=>b.disabled=false);
   document.querySelector('#mode-3d').onclick=()=>setMode(false);
   document.querySelector('#mode-video').onclick=()=>setMode(true);
+  if(meta)setMode(true);
   document.querySelector('#play').onclick=()=>{
    if(viewer.tick===bundle.endTick)viewer.seek(bundle.startTick);
    viewer.playing=!viewer.playing;

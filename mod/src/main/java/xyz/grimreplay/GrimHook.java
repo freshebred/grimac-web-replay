@@ -31,19 +31,23 @@ final class GrimHook implements AutoCloseable {
  private void installModernSubscribe(ClassLoader loader,Object api,Object eventBus)throws Exception{
   Class<?> flagEventClass=findClass(loader,"ac.grim.grimac.api.event.events.FlagEvent","ac.grim.grimac.api.events.FlagEvent");
   Method subMethod=null;
-  for(Method m:eventBus.getClass().getMethods()){
-   if(m.getName().equals("subscribe")&&m.getParameterCount()>=3){
-    Class<?>[] pt=m.getParameterTypes();
-    if(pt[1].isAssignableFrom(Class.class)&&pt[2].isInterface()){subMethod=m;break;}
-   }
-  }
-  if(subMethod==null){
+  try{
    for(Method m:Class.forName("ac.grim.grimac.api.event.EventBus",true,loader).getMethods()){
     if(m.getName().equals("subscribe")&&m.getParameterCount()>=3){
      Class<?>[] pt=m.getParameterTypes();
      if(pt[1].isAssignableFrom(Class.class)&&pt[2].isInterface()){subMethod=m;break;}
     }
    }
+  }catch(Throwable ignored){}
+  if(subMethod==null){
+   try{
+    for(Method m:eventBus.getClass().getMethods()){
+     if(m.getName().equals("subscribe")&&m.getParameterCount()>=3){
+      Class<?>[] pt=m.getParameterTypes();
+      if(pt[1].isAssignableFrom(Class.class)&&pt[2].isInterface()){subMethod=m;break;}
+     }
+    }
+   }catch(Throwable ignored){}
   }
   if(subMethod==null)throw new NoSuchMethodException("EventBus.subscribe not found");
   Class<?> contextType=subMethod.getParameterTypes()[0];
@@ -148,10 +152,22 @@ final class GrimHook implements AutoCloseable {
   throw new ClassNotFoundException(Arrays.toString(names));
  }
  private static Object invokeAny(Object target,String method)throws Exception{
+  for(Class<?> iface:target.getClass().getInterfaces()){
+   try{Method m=iface.getMethod(method);m.setAccessible(true);return m.invoke(target);}catch(Throwable ignored){}
+  }
+  try{
+   Class<?> abs=Class.forName("ac.grim.grimac.api.GrimAbstractAPI",true,target.getClass().getClassLoader());
+   if(abs.isInstance(target)){Method m=abs.getMethod(method);m.setAccessible(true);return m.invoke(target);}
+  }catch(Throwable ignored){}
+  try{Method m=target.getClass().getMethod(method);m.setAccessible(true);return m.invoke(target);}catch(Throwable ignored){}
   for(Method m:target.getClass().getMethods())if(m.getName().equals(method)&&m.getParameterCount()==0){m.setAccessible(true);return m.invoke(target);}
   throw new NoSuchMethodException(method);
  }
  private static Object invokeOptional(Object target,String method){
+  for(Class<?> iface:target.getClass().getInterfaces()){
+   try{Method m=iface.getMethod(method);m.setAccessible(true);return m.invoke(target);}catch(Throwable ignored){}
+  }
+  try{Method m=target.getClass().getMethod(method);m.setAccessible(true);return m.invoke(target);}catch(Throwable ignored){}
   try{
    for(Method m:target.getClass().getMethods())if(m.getName().equals(method)&&m.getParameterCount()==0){m.setAccessible(true);return m.invoke(target);}
   }catch(Throwable ignored){}
