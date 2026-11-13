@@ -56,7 +56,13 @@ final class Recording {
     }
     Map<String,Object> bundle(String serverId,long now,String code){
         long start=frames.isEmpty()?now:((Number)frames.getFirst().get("tick")).longValue();
-        var snaps=sections.values().stream().flatMap(Collection::stream).sorted(Comparator.comparingLong(Section::tick)).map(s->s.snapshot(start)).toList();
+        var snaps=new ArrayList<Map<String,Object>>();
+        for(var h:sections.values()){
+            var it=h.iterator();
+            if(it.hasNext())snaps.add(it.next().snapshot(start));
+            while(it.hasNext()){var s=it.next();snaps.add(s.snapshot(s.tick()));}
+        }
+        snaps.sort(Comparator.comparingLong(s->((Number)s.get("tick")).longValue()));
         var out=new LinkedHashMap<String,Object>();
         out.put("schemaVersion",1);out.put("id",UUID.randomUUID().toString());out.put("serverId",serverId);out.put("createdAt",Instant.now().toString());
         out.put("player",Map.of("uuid",playerId.toString(),"name",playerName));out.put("dimension",dimension);out.put("startTick",start);out.put("endTick",now);out.put("tickRate",20);

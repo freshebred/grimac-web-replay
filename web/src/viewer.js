@@ -11,7 +11,14 @@ export class ReplayViewer{
   this.player=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(.6,1.8,.6)),new THREE.LineBasicMaterial({color:0xc6f19d,depthTest:false}));this.player.renderOrder=10;this.scene.add(this.player);
   this.look=new THREE.ArrowHelper(new THREE.Vector3(0,0,1),new THREE.Vector3(),1.5,0xc6f19d,.3,.15);this.scene.add(this.look);
   this.ro=new ResizeObserver(()=>{const {width,height}=host.getBoundingClientRect();this.renderer.setSize(width,height,false);this.camera.aspect=width/height;this.camera.updateProjectionMatrix();this.draw();});this.ro.observe(host);
-  try{this.initializing=true;this.seek(this.tick);this.initializing=false;}catch(e){this.dispose();throw e;}this.resetCamera();this.lastTime=performance.now();this.loop=this.loop.bind(this);this.raf=requestAnimationFrame(this.loop);
+  try{
+   this.initializing=true;
+   this.world.seek(bundle.endTick);
+   this.rebuild();
+   this.seek(this.tick);
+   this.initializing=false;
+  }catch(e){this.dispose();throw e;}
+  this.resetCamera();this.lastTime=performance.now();this.loop=this.loop.bind(this);this.raf=requestAnimationFrame(this.loop);
  }
  resetCamera(){const f=frameAt(this.bundle.frames,this.tick);this.controls.target.set(f.x,f.y+.9,f.z);this.camera.position.set(f.x+12,f.y+10,f.z+12);this.controls.update();this.draw();}
  rebuild(){if(this.terrain){this.scene.remove(this.terrain);this.terrain.dispose();}const parts=[];
